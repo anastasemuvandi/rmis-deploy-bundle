@@ -1,0 +1,89 @@
+# RMIS — offline deploy to 10.10.73.8 (staging, direct-IP, HTTP)
+#
+# Build-free Compose file: runs the pre-built images loaded from rmis-images.tar.
+# All `build:` blocks removed; every value the app needs is inlined or pulled
+# from .env (CLIENT_SECRET only).
+#
+# Assumes the GoR SSO stack (sso-deploy-bundle) is ALREADY running on this same
+# host — RMIS is a CLIENT of it. The backend reaches the SSO over the host's
+# published ports via host.docker.internal (the two stacks are separate Compose
+# projects, so service names like `wrapper`/`keycloak` are NOT reachable here).
+name: rmis
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: rmis-postgres
+    environment:
+      POSTGRES_DB: rmis_db
+      POSTGRES_USER: rmis_user
+      POSTGRES_PASSWORD: rmis_pass
+    volumes:
+      - rmis_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rmis_user -d rmis_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rmis-net
+    restart: unless-stopped
+
+  backend:
+    image: localhost/rmis/backend:latest
+    container_name: rmis-backend
+    environment:
+      DB_USERNAME: rmis_user
+      DB_PASSWORD: rmis_pass
+      JWT_SECRET: rmis-super-secret-key-change-in-production-must-be-256bits-long
+      # SPA is served by nginx on http://10.10.73.8 (:80) — that's the only browser origin.
+      CORS_ORIGINS: http://10.10.73.8
+      # [GoR-SSO] OIDC client config — see backend application.properties for what each does.
+      CLIENT_ID: rmis-portal
+      # [GoR-SSO] Secret is NOT committed — supplied via .env (gitignored) at `up` time.
+      CLIENT_SECRET: ${CLIENT_SECRET:?CLIENT_SECRET must be set (see .env)}
+      # [GoR-SSO] issuer-uri is COMPARED to the id_token "iss" claim, never fetched.
+      # [GoR-SSO] On this host Keycloak runs with KC_HOSTNAME=10.10.73.8, so it stamps
+      # [GoR-SSO] iss=http://10.10.73.8:8080/... — this MUST match (NOT localhost).
+      SSO_ISSUER_URI: http://10.10.73.8:8080/realms/government-internal
+      # [GoR-SSO] These are FETCHED/called server-side from inside the container, so they
+      # [GoR-SSO] reach the SSO stack's host-published ports via host.docker.internal.
+      SSO_JWK_SET_URI: http://host.docker.internal:8080/realms/government-internal/protocol/openid-connect/certs
+      SSO_TOKEN_URI: http://host.docker.internal:8000/oauth2/token
+      SSO_USERINFO_URI: http://host.docker.internal:8000/auth/userinfo
+      # [GoR-SSO] authorization-uri is browser-facing (the 302 target) -> host IP :8000.
+      SSO_AUTH_URI: http://10.10.73.8:8000/oauth2/authorize
+      # [GoR-SSO] After login, bounce the browser back to the RMIS SPA (host :80).
+      FRONTEND_URL: http://10.10.73.8
+    ports:
+      - "8085:8080"
+    # [GoR-SSO] Lets the container resolve host.docker.internal to the host gateway
+    # [GoR-SSO] (automatic on Docker Desktop; explicit here so Linux hosts work too).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rmis-net
+    restart: unless-stopped
+
+  frontend:
+    image: localhost/rmis/frontend:latest
+    container_name: rmis-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - rmis-net
+    restart: unless-stopped
+
+volumes:
+  rmis_pg_data:
+    name: rmis_pg_data
+
+networks:
+  rmis-net:
+    name: rmis-net
+    driver: bridge

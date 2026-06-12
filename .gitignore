@@ -1,0 +1,9 @@
+# Secrets — never commit (holds the real CLIENT_SECRET). See .env.example.
+.env
+
+# Build artifact — regenerate with build_images.sh (large binary; not for git).
+rmis-images.tar
+*.tar
+
+# IDE
+.idea/

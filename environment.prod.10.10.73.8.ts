@@ -16,6 +16,7 @@ export const environment = {
   // [GoR-SSO] whenever post_logout_redirect_uri is supplied.
   ssoClientId: 'rmis-portal',
   // [GoR-SSO] Where the wrapper bounces the browser after ending the SSO session.
-  // [GoR-SSO] MUST be registered on the rmis-portal client. SPA is served by nginx on :80.
-  postLogoutRedirectUri: 'http://10.10.73.8/login'
+  // [GoR-SSO] MUST be registered on the rmis-portal client. :80 is taken by another
+  // [GoR-SSO] nginx on this box, so the SPA origin is the direct port :8086.
+  postLogoutRedirectUri: 'http://10.10.73.8:8086/login'
 };

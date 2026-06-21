@@ -21,6 +21,7 @@ reaches it over the host's published ports.
 | `build_images.sh` | Workstation-side: builds the two RMIS images (bakes `10.10.73.8` into the frontend) + packs the tar. |
 | `environment.prod.10.10.73.8.ts` | The frontend prod env with `10.10.73.8` URLs baked in. `build_images.sh` swaps this in at build time. |
 | `update_clients.sh` | Server-side: registers/repoints the `rmis-portal` Keycloak client to the `10.10.73.8` URLs. |
+| `rmis-nginx.conf` | System nginx site that fronts `:80` and reverse-proxies to the frontend container on `:8086`. Install per Step 5. |
 | `.env` | `CLIENT_SECRET` + Keycloak admin creds (used by compose + `update_clients.sh`). |
 
 ## How the URLs are split (read this first)
@@ -59,9 +60,14 @@ bash ./build_images.sh
   in `sso-deploy`), publishing wrapper `:8000` and Keycloak `:8080` on `10.10.73.8`.
 - **Architecture: x86_64 / amd64** (the images are `linux/amd64`). `uname -m` → `x86_64`.
 - Docker Engine + Compose plugin: `docker compose version`.
-- Free TCP ports: **80** (frontend), **8085** (backend), **5436** (Postgres). These
-  don't collide with the SSO stack (8000/8080/3001/8090). Check:
-  `ss -ltnp | grep -E ':(80|8085|5436)\b'` (should be empty).
+- Free TCP ports: **8086** (frontend container), **8085** (backend), **5436**
+  (Postgres). These don't collide with the SSO stack (8000/8080/3001/8090). Check:
+  `ss -ltnp | grep -E ':(8086|8085|5436)\b'` (should be empty).
+- Port **80** is expected to be owned by the **shared system nginx** on this host
+  (it's the single browser-facing origin, `http://10.10.73.8`). The frontend
+  container therefore binds `:8086` and system nginx proxies `:80 -> :8086`
+  (Step 5). If `:80` is *not* yet taken and you have no shared nginx, you can skip
+  Step 5 and change the frontend port mapping back to `"80:80"` in the Compose file.
 - The backend container must be able to reach the host's `:8000`/`:8080` via
   `host.docker.internal` (the Compose file adds `host-gateway` for this).
 
@@ -126,12 +132,36 @@ come up (it creates its schema on first boot with `ddl-auto=update`):
 docker compose -f docker-compose.deploy.yml logs -f backend   # wait for "Started ... in N seconds"
 ```
 
-## Step 5 — smoke test
+## Step 5 — install the system nginx site
+
+The shared system nginx owns `:80` on this host, so the frontend container binds
+`:8086` (see the Compose file) and nginx reverse-proxies `:80 -> 127.0.0.1:8086`.
+This keeps the browser origin at `http://10.10.73.8` — exactly what `CORS_ORIGINS`,
+`FRONTEND_URL`, and the Keycloak `redirect_uri` expect, so no app config changes.
+
+```bash
+sudo cp rmis-nginx.conf /etc/nginx/conf.d/rmis.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+> SSO is **not** proxied here — the SPA hits the backend (`:8085`) and wrapper
+> (`:8000`) directly via absolute URLs, so `/oauth2` and `/login/oauth2` never pass
+> through this site. It's a plain pass-through of `:80`.
+
+> **`default_server` caveat:** if the shared nginx already has a
+> `server { listen 80 default_server; ... }` block (a catch-all for another app),
+> requests with no matching `server_name` go *there*, not to this `server_name _;`
+> site. Check with `grep -rn 'default_server' /etc/nginx/`. If one exists, either
+> give RMIS its own hostname (`server_name rmis.<domain>;`) or fold this `location /`
+> block into the existing default site instead of shipping a second server block.
+
+## Step 6 — smoke test
 
 On the server:
 
 ```bash
-curl -sSIf http://10.10.73.8/            | head -n1   # frontend (nginx) 200
+curl -sSIf http://10.10.73.8/            | head -n1   # via system nginx -> :8086 container, 200
+curl -sSIf http://127.0.0.1:8086/        | head -n1   # frontend container directly, 200
 curl -sSI  http://10.10.73.8:8085/api/auth/login | head -n1  # backend reachable (405/401 is fine — it's alive)
 ```
 
@@ -175,6 +205,12 @@ docker compose -f docker-compose.deploy.yml down -v
 - **SPA shows the wrong SSO URL / logout doesn't end the session:** the frontend
   URLs are baked into the JS at build time. If the IP changed, rebuild the
   frontend image (Step 0) and re-ship the tar.
+- **`failed to bind host port for 0.0.0.0:80 ... address already in use`** (frontend
+  won't start): the shared system nginx (or another process) already holds `:80`.
+  That's expected on this host — the frontend should bind `:8086`, not `:80`.
+  Confirm the Compose `frontend.ports` is `"8086:80"` and that you ran Step 5 so
+  nginx proxies `:80 -> :8086`. Identify the `:80` holder with
+  `sudo ss -ltnp 'sport = :80'`.
 - **`400: client_id is required ...` on logout:** the SPA must send `client_id`
   (`rmis-portal`) on `/oauth2/logout` — it does, via the baked `ssoClientId`. If
   you changed the env, keep that field set.

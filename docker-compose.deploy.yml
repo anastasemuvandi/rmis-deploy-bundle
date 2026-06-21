@@ -36,8 +36,9 @@ services:
       DB_USERNAME: rmis_user
       DB_PASSWORD: rmis_pass
       JWT_SECRET: rmis-super-secret-key-change-in-production-must-be-256bits-long
-      # SPA is served by nginx on http://10.10.73.8 (:80) — that's the only browser origin.
-      CORS_ORIGINS: http://10.10.73.8
+      # On this prod box :80 is owned by a different (shared) nginx, so RMIS is
+      # reached directly on :8086 — that's the real browser origin.
+      CORS_ORIGINS: http://10.10.73.8:8086
       # [GoR-SSO] OIDC client config — see backend application.properties for what each does.
       CLIENT_ID: rmis-portal
       # [GoR-SSO] Secret is NOT committed — supplied via .env (gitignored) at `up` time.
@@ -53,8 +54,10 @@ services:
       SSO_USERINFO_URI: http://host.docker.internal:8000/auth/userinfo
       # [GoR-SSO] authorization-uri is browser-facing (the 302 target) -> host IP :8000.
       SSO_AUTH_URI: http://10.10.73.8:8000/oauth2/authorize
-      # [GoR-SSO] After login, bounce the browser back to the RMIS SPA (host :80).
-      FRONTEND_URL: http://10.10.73.8
+      # [GoR-SSO] After login, bounce the browser back to the RMIS SPA. :80 is taken
+      # [GoR-SSO] by another nginx on this box, so the SPA origin is the direct port :8086.
+      # [GoR-SSO] This is the base for the post-login 302 to <FRONTEND_URL>/sso/callback.
+      FRONTEND_URL: http://10.10.73.8:8086
     ports:
       - "8085:8080"
     # [GoR-SSO] Lets the container resolve host.docker.internal to the host gateway
@@ -72,7 +75,9 @@ services:
     image: localhost/rmis/frontend:latest
     container_name: rmis-frontend
     ports:
-      - "80:80"
+      # Host :80 is owned by the shared system nginx (the single browser origin).
+      # Bind 8086 instead and let nginx proxy_pass http://127.0.0.1:8086 -> here.
+      - "8086:80"
     depends_on:
       - backend
     networks:
